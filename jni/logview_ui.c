@@ -78,6 +78,7 @@ static int gStatus = 0;       /* 0 就绪 1 已载入 2 解析中 3 已停止 */
 
 /* 触摸状态 */
 static int gDownX = 0, gDownY = 0, gDownBtn = -1, gDownInLog = 0, gLastY = 0;
+static int gScrollDrag = 0;   /* 正在拖动滚动条 */
 
 /* ================= GL 对象 ================= */
 static GLuint gProgSolid = 0, gProgTex = 0;
@@ -717,6 +718,27 @@ static void drawFrame(void) {
 }
 
 /* ================= 触摸处理(UI 线程) ================= */
+/* 把触摸 y 映射为滚动位置(与滚动条几何一致) */
+static void scrollbarToY(Layout* L, float y) {
+    float S = L->S;
+    int visibleLines = (int)((L->logH - L->titlePad - 6.0f * S) / L->lineH);
+    if (visibleLines < 1) visibleLines = 1;
+    int maxScroll = gMatchCount - visibleLines;
+    if (maxScroll <= 0) { gScroll = 0; return; }
+
+    float trackY = L->logY + L->titlePad;
+    float trackH = L->logH - L->titlePad - 4.0f * S;
+    float thumbH = trackH * (float)visibleLines / (float)gMatchCount;
+    float minThumb = 12.0f * S;
+    if (thumbH < minThumb) thumbH = minThumb;
+    if (thumbH > trackH) thumbH = trackH;
+    float range = trackH - thumbH;
+    float frac = (y - trackY - thumbH * 0.5f) / range;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    gScroll = (int)((1.0f - frac) * (float)maxScroll + 0.5f);
+}
+
 static int hitButton(const Layout* L, float x, float y) {
     if (y < L->btnY || y > L->btnY + L->btnH) return -1;
     for (int i = 0; i < BTN_COUNT; i++)
@@ -730,11 +752,20 @@ static void touchDown(float x, float y) {
     gDownBtn = hitButton(&L, x, y);
     gDownInLog = (x >= L.logX && x <= L.logX + L.logW &&
                   y >= L.logY && y <= L.logY + L.logH);
+    gScrollDrag = 0;
+    if (gDownInLog && gDownBtn < 0 && x >= L.logX + L.logW - 20.0f * L.S) {
+        /* 右边缘 20S 宽作为滚动条触摸区: 点击轨道即跳到对应位置 */
+        gScrollDrag = 1;
+        scrollbarToY(&L, y);
+    }
 }
 
 static void touchMove(float x, float y) {
     (void)x;
-    if (gDownInLog) {
+    if (gScrollDrag) {
+        Layout L; computeLayout(&L);
+        scrollbarToY(&L, y);
+    } else if (gDownInLog) {
         Layout L; computeLayout(&L);
         int delta = (int)((gLastY - y) / L.lineH);
         if (delta != 0) { gScroll += delta; gLastY = (int)y; }
@@ -775,6 +806,7 @@ static void touchUp(JNIEnv* env, float x, float y) {
     }
     gDownBtn = -1;
     gDownInLog = 0;
+    gScrollDrag = 0;
 }
 
 /* ================= JNI 接口(与 LogViewGL.java 对应) ================= */
