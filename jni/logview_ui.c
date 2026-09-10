@@ -395,10 +395,10 @@ static void flushBatches(void) {
 #define CLR_HL        1.00f, 0.80f, 0.25f
 
 static void logLineColor(const char* line, float* r, float* g, float* b) {
-    if (strstr(line, " E ")) { *r = 1.00f; *g = 0.45f; *b = 0.45f; return; }
-    if (strstr(line, " W ")) { *r = 1.00f; *g = 0.85f; *b = 0.40f; return; }
-    if (strstr(line, " I ")) { *r = 0.75f; *g = 0.85f; *b = 1.00f; return; }
-    *r = 0.82f; *g = 0.85f; *b = 0.88f;
+    if (strstr(line, " E ")) { *r = 0.72f; *g = 0.06f; *b = 0.06f; return; }  /* 深红 */
+    if (strstr(line, " W ")) { *r = 0.72f; *g = 0.45f; *b = 0.00f; return; }  /* 深琥珀 */
+    if (strstr(line, " I ")) { *r = 0.05f; *g = 0.30f; *b = 0.60f; return; }  /* 深蓝 */
+    *r = 0.05f; *g = 0.06f; *b = 0.08f;                                       /* 近黑 */
 }
 
 /* 匹配索引(过滤后的可见行) */
@@ -411,6 +411,38 @@ static void rebuildMatches(void) {
     for (int i = 0; i < gLineCount; i++) {
         if (filter && !containsNoCase(gLines[i], gKeyword)) continue;
         if (gMatchCount < MAX_LINES) gMatchIdx[gMatchCount++] = i;
+    }
+}
+
+/* 视觉行(自动换行后的每一行): 源行号 + 段范围 [s, e) */
+typedef struct { int line; int s; int e; } VRow;
+#define MAX_VROWS 4096
+static VRow gVRows[MAX_VROWS];
+static int  gVRowCount = 0;
+
+/* 把匹配到的源行按最大宽度拆成视觉行(逐字符, 至少放一个字符) */
+static void buildVRows(float scale, float maxW) {
+    gVRowCount = 0;
+    for (int m = 0; m < gMatchCount && gVRowCount < MAX_VROWS; m++) {
+        const char* s = gLines[gMatchIdx[m]];
+        const char* p = s;
+        while (*p && gVRowCount < MAX_VROWS) {
+            const char* q = p, *end = p;
+            float w = 0;
+            while (*q) {
+                unsigned int cp = utf8Next(&q);
+                float cw = (cp < 0x80 ? FONT_ASC_W : FONT_CJK_W) * scale;
+                if (w + cw > maxW && end != p) break;  /* 已放不下且本段已有字符 */
+                w += cw;
+                end = q;
+                if (w >= maxW) break;                  /* 已填满 */
+            }
+            gVRows[gVRowCount].line = gMatchIdx[m];
+            gVRows[gVRowCount].s = (int)(p - s);
+            gVRows[gVRowCount].e = (int)(end - s);
+            gVRowCount++;
+            p = end;
+        }
     }
 }
 
@@ -482,9 +514,11 @@ static void drawFrame(void) {
         }
     }
     rebuildMatches();
+    buildVRows(S, L.logW - 2.0f * pad);
+
     int visible = (int)((L.logH - L.titlePad - 6.0f * S) / L.lineH);
     if (visible < 1) visible = 1;
-    int maxScroll = gMatchCount - visible;
+    int maxScroll = gVRowCount - visible;
     if (maxScroll < 0) maxScroll = 0;
     if (gScroll > maxScroll) gScroll = maxScroll;
     if (gScroll < 0) gScroll = 0;
@@ -524,28 +558,34 @@ static void drawFrame(void) {
         drawText(L.margin + 4.0f * S, L.statusY, buf, S, CLR_DIM, 1.0f);
     }
 
-    /* 日志显示子窗口 */
-    rectf(L.logX - bd, L.logY - bd, L.logW + 2*bd, L.logH + 2*bd, CLR_BORDER, 1.0f);
-    rectf(L.logX, L.logY, L.logW, L.logH, CLR_WIN_BG, 1.0f);
-    drawText(L.logX + pad, L.logY + 5.0f * S, S_TITLE_LOG, S, CLR_TITLE, 1.0f);
+    /* 日志显示子窗口(白底黑字) */
+    rectf(L.logX - bd, L.logY - bd, L.logW + 2*bd, L.logH + 2*bd, 0.72f, 0.75f, 0.79f, 1.0f);
+    rectf(L.logX, L.logY, L.logW, L.logH, 0.99f, 0.99f, 0.99f, 1.0f);
+    drawText(L.logX + pad, L.logY + 5.0f * S, S_TITLE_LOG, S, 0.20f, 0.26f, 0.36f, 1.0f);
 
     if (gMatchCount == 0) {
         const char* msg = gLineCount ? S_NO_MATCH : S_EMPTY_LOG;
         float tx = L.logX + (L.logW - textWidth(msg, S)) / 2.0f;
         float ty = L.logY + L.titlePad + L.lineH;
-        drawText(tx, ty, msg, S, CLR_DIM, 1.0f);
+        drawText(tx, ty, msg, S, 0.45f, 0.48f, 0.52f, 1.0f);
     } else {
-        int start = gMatchCount - visible - gScroll;
+        int start = gVRowCount - visible - gScroll;
         if (start < 0) start = 0;
-        int end = gMatchCount - gScroll;
+        int end = gVRowCount - gScroll;
         if (end < 0) end = 0;
-        if (end > gMatchCount) end = gMatchCount;
+        if (end > gVRowCount) end = gVRowCount;
         for (int k = start; k < end; k++) {
             float y = L.logY + L.titlePad + (float)(k - start) * L.lineH;
             if (y + L.lineH > L.logY + L.logH - 4.0f * S) break;
+            VRow* vr = &gVRows[k];
+            int len = vr->e - vr->s;
+            char seg[MAX_LEN];
+            if (len >= MAX_LEN) len = MAX_LEN - 1;
+            memcpy(seg, gLines[vr->line] + vr->s, len);
+            seg[len] = 0;
             float r, g, b;
-            logLineColor(gLines[gMatchIdx[k]], &r, &g, &b);
-            drawText(L.logX + pad, y, gLines[gMatchIdx[k]], S, r, g, b, 1.0f);
+            logLineColor(gLines[vr->line], &r, &g, &b);
+            drawText(L.logX + pad, y, seg, S, r, g, b, 1.0f);
         }
     }
 

@@ -31,7 +31,7 @@ static const char* const ALL_STRINGS[] = {
 #define ASCII_FONT "/system/fonts/DroidSansMono.ttf"
 #define CJK_FONT   "/system/fonts/NotoSansCJK-Regular.ttc"
 
-#define ASC_W 8
+#define ASC_W 10
 #define ASC_H 16
 #define CJK_W 16
 #define CJK_H 16
@@ -127,15 +127,17 @@ int main(void) {
             af->family_name, sc, cf->family_name, gCjkCount);
 
     FILE* out = stdout;
-    fputs("/*\n * font_bitmap.h —— 由 tools/genfont.c 自动生成, 勿手动修改\n"
-          " * ASCII: 8x16 灰度  DroidSansMono\n"
-          " * CJK:   16x16 灰度 NotoSansCJK (Simplified Chinese)\n"
-          " */\n"
-          "#ifndef FONT_BITMAP_H\n#define FONT_BITMAP_H\n\n"
-          "#define FONT_ASC_W 8\n#define FONT_ASC_H 16\n"
-          "#define FONT_CJK_W 16\n#define FONT_CJK_H 16\n"
-          "#define FONT_ASC_COUNT 95\n"
-          "#define FONT_CJK_COUNT ", out);
+    fprintf(out,
+        "/*\n * font_bitmap.h —— 由 tools/genfont.c 自动生成, 勿手动修改\n"
+        " * ASCII: %dx%d 灰度  DroidSansMono\n"
+        " * CJK:   %dx%d 灰度 NotoSansCJK (Simplified Chinese)\n"
+        " */\n"
+        "#ifndef FONT_BITMAP_H\n#define FONT_BITMAP_H\n\n"
+        "#define FONT_ASC_W %d\n#define FONT_ASC_H %d\n"
+        "#define FONT_CJK_W %d\n#define FONT_CJK_H %d\n"
+        "#define FONT_ASC_COUNT 95\n"
+        "#define FONT_CJK_COUNT ",
+        ASC_W, ASC_H, CJK_W, CJK_H, ASC_W, ASC_H, CJK_W, CJK_H);
     fprintf(out, "%d\n\n", gCjkCount);
 
     /* ASCII 数组 */
