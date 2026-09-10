@@ -26,6 +26,16 @@ echo "==> 编译 libnativegl.so ($ABI)"
     -Lprebuilt/syslib -lGLESv2 \
     -llog
 
+echo "==> 编译 liblogview.so ($ABI)"
+"$CC" -target "$TARGET" -std=c99 -O2 -fPIC -shared \
+    -Iprebuilt/include \
+    -I"${PREFIX}/include" \
+    jni/logview_ui.c \
+    -o "lib/$ABI/liblogview.so" \
+    -Lprebuilt/syslib -lGLESv2 \
+    -llog
+
 echo "==> 校验产物"
 "${PREFIX}/bin/llvm-readelf" -d "lib/$ABI/libnativegl.so" | grep NEEDED
-echo "    OK: lib/$ABI/libnativegl.so"
+"${PREFIX}/bin/llvm-readelf" -d "lib/$ABI/liblogview.so" | grep NEEDED
+echo "    OK: lib/$ABI/libnativegl.so, lib/$ABI/liblogview.so"
