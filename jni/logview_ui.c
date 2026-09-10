@@ -50,18 +50,14 @@ static char gKeyword[64] = "";
 
 #define MAX_LINES 512
 #define MAX_LEN   160
-static char gLines[MAX_LINES][MAX_LEN];
+static char gLines[MAX_LINES][MAX_LEN];      /* 显示缓冲区(当前已显示的行) */
 static int  gLineCount = 0;
 static int  gScroll = 0;      /* 上滚行数(0=跟随最新) */
 
-/* 演示用“日志文件”内容 */
-static const char* const FILE_LINES[] = {
-    S_LOG_0, S_LOG_1, S_LOG_2, S_LOG_3, S_LOG_4,
-    S_LOG_5, S_LOG_6, S_LOG_7, S_LOG_8, S_LOG_9,
-};
-#define FILE_COUNT ((int)(sizeof(FILE_LINES)/sizeof(FILE_LINES[0])))
-static int gFilePending = 0;  /* 待流入显示缓冲区的行数 */
-static int gFileIdx = 0;
+/* 已打开文件的内容(解析源) */
+static char gFileLines[MAX_LINES][MAX_LEN];
+static int  gFileLineCount = 0;
+static int  gFileIdx = 0;     /* “运行解析”已流入显示缓冲区的行数 */
 
 static const char* const STATUS_TEXTS[] = {
     S_STATUS_READY, S_STATUS_LOADED, S_STATUS_RUN, S_STATUS_STOP
@@ -79,9 +75,10 @@ static GLint  gUTexHalf = -1, gUTexSampler = -1;
 static GLint  gATexP = -1, gATexUV = -1, gATexC = -1;
 static GLuint gTexAsc = 0, gTexCjk = 0;
 
-/* JNI 回调(搜索按钮 -> 弹出软键盘) */
+/* JNI 回调 */
 static jclass    gCls = NULL;
-static jmethodID gReqFocus = NULL;
+static jmethodID gReqFocus = NULL;    /* 搜索 -> 弹软键盘 */
+static jmethodID gReqOpenFile = NULL; /* 打开 -> 系统文件选择器 */
 
 /* ================= 绘制批次缓冲 ================= */
 #define MAX_RECTS 256
@@ -417,13 +414,42 @@ static void rebuildMatches(void) {
     }
 }
 
-/* ================= 文件装载 / 解析模拟 ================= */
-static void loadFile(void) {
+/* ================= 文件装载 / 解析 ================= */
+/* 把打开的文件内容填入 gFileLines 并立即显示 */
+static void applyFileContent(const char* text) {
+    gFileLineCount = 0;
     gLineCount = 0;
-    gFilePending = FILE_COUNT;
+    gScroll = 0;
+    gFileIdx = 0;
+    gRunning = 0;
+
+    const char* p = text;
+    while (*p && gFileLineCount < MAX_LINES) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len >= MAX_LEN) len = MAX_LEN - 1;
+        if (len > 0 && p[len-1] == '\r') len--;      /* 去掉 CRLF 的 \r */
+        if (len > 0) {
+            memcpy(gFileLines[gFileLineCount], p, len);
+            gFileLines[gFileLineCount][len] = 0;
+            memcpy(gLines[gFileLineCount], gFileLines[gFileLineCount], len + 1);
+            gFileLineCount++;
+            gLineCount++;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    gStatus = 1; /* 已载入 */
+}
+
+/* 开始“运行解析”: 清空显示后逐行流入(模拟逐行解析) */
+static void startParse(void) {
+    if (gFileLineCount == 0) return;
+    gLineCount = 0;
     gFileIdx = 0;
     gScroll = 0;
-    gStatus = 1; /* 已载入 */
+    gRunning = 1;
+    gStatus = 2; /* 解析中 */
 }
 
 /* 每帧最多流入的行数 */
@@ -440,18 +466,17 @@ static void drawFrame(void) {
     float bd = S;                       /* 边框宽度(随缩放) */
     float pad = 8.0f * S;
 
-    /* ---- 模拟解析: 运行中逐行流入 ---- */
-    if (gRunning && gFilePending > 0) {
-        for (int i = 0; i < STREAM_PER_FRAME && gFilePending > 0; i++) {
+    /* ---- 运行解析: 逐行流入显示 ---- */
+    if (gRunning && gFileIdx < gFileLineCount) {
+        for (int i = 0; i < STREAM_PER_FRAME && gFileIdx < gFileLineCount; i++) {
             if (gLineCount < MAX_LINES) {
-                strncpy(gLines[gLineCount], FILE_LINES[gFileIdx], MAX_LEN - 1);
+                memcpy(gLines[gLineCount], gFileLines[gFileIdx], MAX_LEN);
                 gLines[gLineCount][MAX_LEN - 1] = 0;
                 gLineCount++;
             }
             gFileIdx++;
-            gFilePending--;
         }
-        if (gFilePending == 0) {
+        if (gFileIdx >= gFileLineCount) {
             gRunning = 0;
             gStatus = 3; /* 已停止 */
         }
@@ -505,10 +530,7 @@ static void drawFrame(void) {
     drawText(L.logX + pad, L.logY + 5.0f * S, S_TITLE_LOG, S, CLR_TITLE, 1.0f);
 
     if (gMatchCount == 0) {
-        const char* msg;
-        if (gLineCount)            msg = S_NO_MATCH;
-        else if (gFilePending > 0) msg = S_HINT_PARSE;
-        else                       msg = S_EMPTY_LOG;
+        const char* msg = gLineCount ? S_NO_MATCH : S_EMPTY_LOG;
         float tx = L.logX + (L.logW - textWidth(msg, S)) / 2.0f;
         float ty = L.logY + L.titlePad + L.lineH;
         drawText(tx, ty, msg, S, CLR_DIM, 1.0f);
@@ -606,16 +628,17 @@ static void touchUp(JNIEnv* env, float x, float y) {
     if (gDownBtn >= 0 && btn == gDownBtn) {
         switch (btn) {
             case BTN_OPEN:
-                loadFile();
+                /* 调系统文件选择器, 结果经 setFileContent 回来 */
+                gHelpOpen = 0;
+                if (env && gCls && gReqOpenFile)
+                    (*env)->CallStaticVoidMethod(env, gCls, gReqOpenFile);
                 break;
             case BTN_PARSE:
-                if (gFilePending == 0) loadFile();
-                gRunning = 1;
-                gStatus = 2; /* 解析中 */
+                startParse();
                 break;
             case BTN_STOP:
                 gRunning = 0;
-                if (gFilePending > 0 || gLineCount > 0) gStatus = 3;
+                if (gFileIdx < gFileLineCount || gLineCount > 0) gStatus = 3;
                 break;
             case BTN_SEARCH:
                 gSearchFocus = 1;
@@ -656,11 +679,12 @@ Java_com_example_ndkgles_LogViewGL_init(JNIEnv* env, jclass cls) {
     gTexCjk = makeFontTexture(&FONT_CJK_BMP[0][0], FONT_CJK_COUNT,
                               FONT_CJK_W, FONT_CJK_H, 16, &gCjkW, &gCjkH);
 
-    /* 缓存 Java 回调(搜索按钮 -> 弹出软键盘) */
+    /* 缓存 Java 回调 */
     jclass c = (*env)->FindClass(env, "com/example/ndkgles/LogViewGL");
     if (c) {
         gCls = (*env)->NewGlobalRef(env, c);
-        gReqFocus = (*env)->GetStaticMethodID(env, c, "requestSearchFocus", "()V");
+        gReqFocus    = (*env)->GetStaticMethodID(env, c, "requestSearchFocus", "()V");
+        gReqOpenFile = (*env)->GetStaticMethodID(env, c, "requestOpenFile", "()V");
     }
 
     gInited = 1;
@@ -717,6 +741,18 @@ Java_com_example_ndkgles_LogViewGL_setKeyword(JNIEnv* env, jclass cls, jstring k
         gKeyword[sizeof(gKeyword) - 1] = 0;
         gSearchFocus = 0;
         (*env)->ReleaseStringUTFChars(env, kw, s);
+    }
+    pthread_mutex_unlock(&gLock);
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_ndkgles_LogViewGL_setFileContent(JNIEnv* env, jclass cls, jstring text) {
+    (void)cls;
+    const char* s = (*env)->GetStringUTFChars(env, text, NULL);
+    pthread_mutex_lock(&gLock);
+    if (s) {
+        applyFileContent(s);
+        (*env)->ReleaseStringUTFChars(env, text, s);
     }
     pthread_mutex_unlock(&gLock);
 }

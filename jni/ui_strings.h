@@ -31,8 +31,7 @@
 #define S_STATUS_STOP   "已停止"
 
 /* ---- 日志窗口占位 / 空匹配 ---- */
-#define S_EMPTY_LOG     "请点击 打开 载入日志"
-#define S_HINT_PARSE    "已载入, 点击 运行解析 显示"
+#define S_EMPTY_LOG     "请点击 打开 选择文件"
 #define S_NO_MATCH      "无匹配行"
 
 /* ---- 搜索窗口提示 ---- */
@@ -41,23 +40,11 @@
 
 /* ---- 帮助面板 ---- */
 #define S_HELP_TITLE    "帮助"
-#define S_HELP_L1       "打开 : 载入日志文件"
+#define S_HELP_L1       "打开 : 选择日志文件"
 #define S_HELP_L2       "运行解析 : 开始解析显示"
 #define S_HELP_L3       "停止 : 停止解析"
 #define S_HELP_L4       "搜索 : 关键字过滤显示"
 #define S_HELP_L5       "帮助 : 显示本说明"
 #define S_HELP_L6       "点击空白处关闭"
-
-/* ---- 演示日志内容(模拟一个日志文件) ---- */
-#define S_LOG_0 "--------- beginning of main"
-#define S_LOG_1 "01-01 00:00:00.001  1000  1000 I NDKGL  : GL renderer = Mali-G77"
-#define S_LOG_2 "01-01 00:00:00.012  1000  1000 I NDKGL  : 着色器编译成功"
-#define S_LOG_3 "01-01 00:00:00.020  1000  1000 I NDKGL  : 载入字体纹理 16x16"
-#define S_LOG_4 "01-01 00:00:00.105  1000  1000 W NDKGL  : 帧率下降"
-#define S_LOG_5 "01-01 00:00:00.210  1000  1000 E NDKGL  : 分配缓冲失败"
-#define S_LOG_6 "01-01 00:00:00.211  1000  1000 E NDKGL  : 加载模块失败"
-#define S_LOG_7 "01-01 00:01:00.000  1000  1000 I NDKGL  : 解析开始"
-#define S_LOG_8 "01-01 00:01:00.002  1000  1000 I NDKGL  : 关键字过滤 = error"
-#define S_LOG_9 "01-01 00:01:00.500  1000  1000 I NDKGL  : 停止解析"
 
 #endif /* UI_STRINGS_H */

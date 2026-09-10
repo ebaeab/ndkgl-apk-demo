@@ -17,6 +17,7 @@ public final class LogViewGL {
     }
 
     private static EditText sEdit = null;
+    private static LogViewActivity sActivity = null;
     private static final Handler sMain = new Handler(Looper.getMainLooper());
 
     private static native void init();
@@ -26,9 +27,11 @@ public final class LogViewGL {
     static native void touchMove(float x, float y);
     static native void touchUp(float x, float y);
     public  static native void setKeyword(String kw);
+    public  static native void setFileContent(String text);
 
-    /** 由 LogViewActivity 注入底部输入框, 供 [搜索] 按钮聚焦。 */
-    public static void attach(EditText edit) {
+    /** 由 LogViewActivity 注入底部输入框与 Activity, 供 [搜索]/[打开] 回调。 */
+    public static void attach(LogViewActivity a, EditText edit) {
+        sActivity = a;
         sEdit = edit;
     }
 
@@ -43,6 +46,15 @@ public final class LogViewGL {
                         sEdit.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
                     if (imm != null) imm.showSoftInput(sEdit, InputMethodManager.SHOW_IMPLICIT);
                 }
+            }
+        });
+    }
+
+    /** 由 native 调用(在 GL 线程), 切回主线程打开系统文件选择器。 */
+    public static void requestOpenFile() {
+        sMain.post(new Runnable() {
+            @Override public void run() {
+                if (sActivity != null) sActivity.openFilePicker();
             }
         });
     }
