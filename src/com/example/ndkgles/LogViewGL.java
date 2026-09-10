@@ -27,7 +27,7 @@ public final class LogViewGL {
     static native void touchMove(float x, float y);
     static native void touchUp(float x, float y);
     public  static native void setKeyword(String kw);
-    public  static native void setFileContent(String text);
+    public  static native void setFileContent(byte[] data, boolean tail);
 
     /** 由 LogViewActivity 注入底部输入框与 Activity, 供 [搜索]/[打开] 回调。 */
     public static void attach(LogViewActivity a, EditText edit) {
@@ -55,6 +55,15 @@ public final class LogViewGL {
         sMain.post(new Runnable() {
             @Override public void run() {
                 if (sActivity != null) sActivity.openFilePicker();
+            }
+        });
+    }
+
+    /** 由 native 调用(在 GL 线程), 切回主线程重读同一文件(tail 刷新)。 */
+    public static void requestRefreshFile() {
+        sMain.post(new Runnable() {
+            @Override public void run() {
+                if (sActivity != null) sActivity.refreshFile();
             }
         });
     }

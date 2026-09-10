@@ -17,7 +17,6 @@ import android.widget.Toast;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 
 /**
  * 日志查看器入口: 上半部分是 GLSurfaceView(由 native 绘制工具栏/日志窗口/搜索窗口),
@@ -25,6 +24,7 @@ import java.nio.charset.StandardCharsets;
  */
 public class LogViewActivity extends Activity {
     private GLSurfaceView glView;
+    private Uri mUri = null;   /* 当前打开的文件, 供 [刷新] 重读 */
 
     @Override
     protected void onCreate(Bundle b) {
@@ -100,28 +100,47 @@ public class LogViewActivity extends Activity {
         if (requestCode != REQ_OPEN_FILE || resultCode != RESULT_OK || data == null) return;
         Uri uri = data.getData();
         if (uri == null) return;
+        mUri = uri;
+        loadFromUri(uri, false);   /* 打开: 显示开头 */
+    }
+
+    /** 供 native [刷新] 按钮回调: 重读同一文件并跳到末尾(tail) */
+    public void refreshFile() {
+        if (mUri == null) {
+            Toast.makeText(this, "请先打开文件", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        loadFromUri(mUri, true);   /* 刷新: 跳到末尾 */
+    }
+
+    private void loadFromUri(Uri uri, boolean tail) {
         try {
-            String text = readText(uri);
-            LogViewGL.setFileContent(text);
+            byte[] data = readBytes(uri);
+            LogViewGL.setFileContent(data, tail);
         } catch (IOException e) {
             Toast.makeText(this, "读取文件失败", Toast.LENGTH_SHORT).show();
         }
     }
 
-    /** 通过 ContentResolver 读取所选文件文本(最多 1MB) */
-    private String readText(Uri uri) throws IOException {
+    private static final int MAX_BYTES = 50 * 1024 * 1024;
+
+    /** 通过 ContentResolver 读取所选文件字节(最多 50MB) */
+    private byte[] readBytes(Uri uri) throws IOException {
         InputStream in = getContentResolver().openInputStream(uri);
         if (in == null) throw new IOException("openInputStream null");
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
+        byte[] buf = new byte[65536];
         int n, total = 0;
         while ((n = in.read(buf)) > 0) {
-            total += n;
-            if (total > 1024 * 1024) break;   // 最多读 1MB, 足够查看日志
+            if (total + n > MAX_BYTES) {
+                bos.write(buf, 0, MAX_BYTES - total);
+                break;
+            }
             bos.write(buf, 0, n);
+            total += n;
         }
         in.close();
-        return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        return bos.toByteArray();
     }
 
     @Override protected void onResume() { super.onResume(); glView.onResume(); }

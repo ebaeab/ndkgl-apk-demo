@@ -14,6 +14,7 @@
 
 /* ---- 工具栏按钮 ---- */
 #define S_BTN_OPEN      "打开"
+#define S_BTN_REFRESH   "刷新"
 #define S_BTN_PARSE     "运行解析"
 #define S_BTN_STOP      "停止"
 #define S_BTN_SEARCH    "搜索"
@@ -41,10 +42,11 @@
 /* ---- 帮助面板 ---- */
 #define S_HELP_TITLE    "帮助"
 #define S_HELP_L1       "打开 : 选择日志文件"
-#define S_HELP_L2       "运行解析 : 开始解析显示"
-#define S_HELP_L3       "停止 : 停止解析"
-#define S_HELP_L4       "搜索 : 关键字过滤显示"
-#define S_HELP_L5       "帮助 : 显示本说明"
-#define S_HELP_L6       "点击空白处关闭"
+#define S_HELP_L2       "刷新 : 重读文件并跳到末尾"
+#define S_HELP_L3       "运行解析 : 开始解析显示"
+#define S_HELP_L4       "停止 : 停止解析"
+#define S_HELP_L5       "搜索 : 关键字过滤显示"
+#define S_HELP_L6       "帮助 : 显示本说明"
+#define S_HELP_L7       "点击空白处关闭"
 
 #endif /* UI_STRINGS_H */

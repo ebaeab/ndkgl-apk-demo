@@ -4,14 +4,15 @@
  * 与 jni_gl.c 一样: EGL/线程/swap 交给 GLSurfaceView, native 只负责绘制与交互。
  * 本文件实现一个带「工具栏 + 日志显示子窗口 + 搜索关键字子窗口」的工具界面:
  *
- *   工具栏:  [打开] [运行解析] [停止] [搜索] [帮助]
- *   日志窗口: 滚动显示日志行(按 I/W/E 等级着色)
+ *   工具栏:  [打开] [刷新] [运行解析] [停止] [搜索] [帮助]
+ *   日志窗口: 白底黑字, 按 I/W/E 等级着色, 超宽自动换行, 可滚动
  *   搜索窗口: 显示当前关键字与匹配行数(关键字由 Java 侧 EditText 输入)
  *   帮助面板: 点击 [帮助] 弹出说明
  *
- * 文字渲染: 内嵌位图字体(jni/font_bitmap.h, 由 tools/genfont.c 生成),
- *           在 GPU 上打包成两张 alpha 纹理(ASCII + 中文), 逐字形画 quad。
+ * 文件内容: 整个文本读入 gText, 建立行索引(gLineOff/gLineLen), 行数不限(动态增长)。
+ *   [打开] 通过 SAF 选文件后显示开头; [刷新] 重读同一文件并跳到末尾(tail)。
  *
+ * 文字渲染: 内嵌位图字体(jni/font_bitmap.h, 由 tools/genfont.c 生成)。
  * 加载: System.loadLibrary("logview")  ->  liblogview.so
  */
 #include <jni.h>
@@ -19,6 +20,7 @@
 #include <GLES2/gl2.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <pthread.h>
 
 #include "ui_strings.h"
@@ -28,19 +30,22 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+#define MAX_BYTES (50 * 1024 * 1024)   /* 文件大小上限 50MB */
+
 /* ================= 全局状态 ================= */
 static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
 static int gW = 1, gH = 1;
 static int gInited = 0;
 
-#define BTN_OPEN   0
-#define BTN_PARSE  1
-#define BTN_STOP   2
-#define BTN_SEARCH 3
-#define BTN_HELP   4
-#define BTN_COUNT  5
+#define BTN_OPEN    0
+#define BTN_REFRESH 1
+#define BTN_PARSE   2
+#define BTN_STOP    3
+#define BTN_SEARCH  4
+#define BTN_HELP    5
+#define BTN_COUNT   6
 static const char* const BTN_LABELS[BTN_COUNT] = {
-    S_BTN_OPEN, S_BTN_PARSE, S_BTN_STOP, S_BTN_SEARCH, S_BTN_HELP
+    S_BTN_OPEN, S_BTN_REFRESH, S_BTN_PARSE, S_BTN_STOP, S_BTN_SEARCH, S_BTN_HELP
 };
 
 static int gRunning = 0;      /* 是否正在“运行解析”(逐行流入) */
@@ -48,16 +53,23 @@ static int gHelpOpen = 0;     /* 帮助面板 */
 static int gSearchFocus = 0;  /* 搜索窗口高亮 */
 static char gKeyword[64] = "";
 
-#define MAX_LINES 512
-#define MAX_LEN   160
-static char gLines[MAX_LINES][MAX_LEN];      /* 显示缓冲区(当前已显示的行) */
-static int  gLineCount = 0;
-static int  gScroll = 0;      /* 上滚行数(0=跟随最新) */
+/* ---- 文件内容(动态, 行数不限) ---- */
+static char*  gText = NULL;       /* 整个文件文本(UTF-8, 0 结尾) */
+static size_t gTextLen = 0;
+static int*   gLineOff = NULL;    /* 每行起始偏移 */
+static int*   gLineLen = NULL;    /* 每行长度(不含 \n / \r) */
+static int    gLineCount = 0;
+static int    gLineCap = 0;
 
-/* 已打开文件的内容(解析源) */
-static char gFileLines[MAX_LINES][MAX_LEN];
-static int  gFileLineCount = 0;
-static int  gFileIdx = 0;     /* “运行解析”已流入显示缓冲区的行数 */
+/* ---- 解析/显示 ---- */
+static int gDisplayed = 0;        /* 已“流入”显示的行数(解析动画进度) */
+static int gScroll = 0;           /* 上滚行数(按源行计, 0=末尾) */
+
+/* ---- 过滤匹配 ---- */
+static int* gMatchIdx = NULL;
+static int  gMatchCount = 0;
+static int  gMatchCap = 0;
+static int  gFilterDirty = 1;
 
 static const char* const STATUS_TEXTS[] = {
     S_STATUS_READY, S_STATUS_LOADED, S_STATUS_RUN, S_STATUS_STOP
@@ -77,8 +89,9 @@ static GLuint gTexAsc = 0, gTexCjk = 0;
 
 /* JNI 回调 */
 static jclass    gCls = NULL;
-static jmethodID gReqFocus = NULL;    /* 搜索 -> 弹软键盘 */
-static jmethodID gReqOpenFile = NULL; /* 打开 -> 系统文件选择器 */
+static jmethodID gReqFocus = NULL;     /* 搜索 -> 弹软键盘 */
+static jmethodID gReqOpenFile = NULL;  /* 打开 -> 系统文件选择器 */
+static jmethodID gReqRefreshFile = NULL;/* 刷新 -> 重读文件 */
 
 /* ================= 绘制批次缓冲 ================= */
 #define MAX_RECTS 256
@@ -122,7 +135,7 @@ static void computeLayout(Layout* L) {
     L->searchW   = W - 2.0f * L->margin;
 
     float gap = 4.0f * L->S;
-    L->btnW = (W - 2.0f * L->margin - 4.0f * gap) / (float)BTN_COUNT;
+    L->btnW = (W - 2.0f * L->margin - (float)(BTN_COUNT - 1) * gap) / (float)BTN_COUNT;
     L->btnH = 38.0f * L->S;
     L->btnY = L->toolbarY + (L->toolbarH - L->btnH) / 2.0f;
     for (int i = 0; i < BTN_COUNT; i++)
@@ -171,15 +184,12 @@ static GLuint buildProgram(const char* vs, const char* fs) {
     return p;
 }
 
-/* 纯色矩形: 顶点含颜色属性 */
 static const char* SOLID_VS =
     "attribute vec2 aP; attribute vec4 aC; varying vec4 vC; uniform vec2 uHalf;\n"
     "void main(){ gl_Position = vec4(aP.x/uHalf.x - 1.0, 1.0 - aP.y/uHalf.y, 0.0, 1.0); vC = aC; }\n";
 static const char* SOLID_FS =
     "precision mediump float; varying vec4 vC;\n"
     "void main(){ gl_FragColor = vC; }\n";
-
-/* 文字纹理: 顶点含 UV 与颜色属性 */
 static const char* TEX_VS =
     "attribute vec2 aP; attribute vec2 aUV; attribute vec4 aC;\n"
     "varying vec2 vUV; varying vec4 vC; uniform vec2 uHalf;\n"
@@ -220,8 +230,7 @@ static GLuint makeFontTexture(const unsigned char* data, int count,
     return tex;
 }
 
-/* 记录两套纹理图集的尺寸 */
-static int gAscW = 128, gAscH = 96;
+static int gAscW = 160, gAscH = 96;
 static int gCjkW = 256, gCjkH = 80;
 
 /* ================= 小工具 ================= */
@@ -253,20 +262,29 @@ static float textWidth(const char* s, float scale) {
     return w;
 }
 
-static int containsNoCase(const char* hay, const char* needle) {
+/* 大小写不敏感(仅 ASCII 字母)的长度感知子串匹配 */
+static int containsNoCase(const char* hay, size_t haylen, const char* needle) {
     if (!needle || !needle[0]) return 1;
     size_t n = strlen(needle);
-    for (const char* h = hay; *h; h++) {
-        const char* a = h, *b = needle; size_t k = 0;
-        while (k < n && *a) {
-            char ca = *a, cb = *b;
+    if (haylen < n) return 0;
+    for (size_t i = 0; i + n <= haylen; i++) {
+        size_t k = 0;
+        for (; k < n; k++) {
+            char ca = hay[i + k], cb = needle[k];
             if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
             if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
             if (ca != cb) break;
-            a++; b++; k++;
         }
         if (k == n) return 1;
     }
+    return 0;
+}
+
+static int memfind(const char* hay, int haylen, const char* needle) {
+    size_t n = strlen(needle);
+    if (haylen < (int)n) return 0;
+    for (int i = 0; i + (int)n <= haylen; i++)
+        if (memcmp(hay + i, needle, n) == 0) return 1;
     return 0;
 }
 
@@ -276,7 +294,6 @@ static void rectf(float x, float y, float w, float h,
     if (gRectN >= MAX_RECTS) return;
     float* v = gRectV + gRectN * 36;
     float x1 = x + w, y1 = y + h;
-    /* 两个三角形, 每个顶点 x,y,r,g,b,a */
     float t[6][6] = {
         {x,  y,  r,g,b,a}, {x1, y,  r,g,b,a}, {x1, y1, r,g,b,a},
         {x,  y,  r,g,b,a}, {x1, y1, r,g,b,a}, {x,  y1, r,g,b,a},
@@ -301,11 +318,12 @@ static void glyph(float* arr, int* n, float x, float y, float w, float h,
     (*n)++;
 }
 
-/* 画一行文字(自动按 ASCII/中文 分到两张纹理批次, v 方向已翻转适配 GL) */
-static void drawText(float x, float y, const char* s, float scale,
-                     float r, float g, float b, float a) {
+/* 画一段文字(长度限定), 自动按 ASCII/中文 分到两张纹理批次 */
+static void drawTextN(float x, float y, const char* s, int len, float scale,
+                      float r, float g, float b, float a) {
     const char* p = s;
-    while (*p) {
+    const char* end = s + len;
+    while (p < end) {
         unsigned int cp = utf8Next(&p);
         if (cp < 0x80) {
             int idx = (int)cp - 0x20;
@@ -313,9 +331,8 @@ static void drawText(float x, float y, const char* s, float scale,
             int col = idx % 16, row = idx / 16;
             float u0 = (col * FONT_ASC_W) / (float)gAscW;
             float u1 = ((col + 1) * FONT_ASC_W) / (float)gAscW;
-            /* GL 把纹理首行当底部, 图集又是自顶向下填充, 故字形顶部 v=row, 底部 v=row+1 */
-            float v0 = (row * FONT_ASC_H) / (float)gAscH;          /* 顶部 */
-            float v1 = ((row + 1) * FONT_ASC_H) / (float)gAscH;    /* 底部 */
+            float v0 = (row * FONT_ASC_H) / (float)gAscH;
+            float v1 = ((row + 1) * FONT_ASC_H) / (float)gAscH;
             glyph(gAscV, &gAscN, x, y, FONT_ASC_W * scale, FONT_ASC_H * scale,
                   u0, v0, u1, v1, r, g, b, a);
             x += FONT_ASC_W * scale;
@@ -325,13 +342,18 @@ static void drawText(float x, float y, const char* s, float scale,
             int col = idx % 16, row = idx / 16;
             float u0 = (col * FONT_CJK_W) / (float)gCjkW;
             float u1 = ((col + 1) * FONT_CJK_W) / (float)gCjkW;
-            float v0 = (row * FONT_CJK_H) / (float)gCjkH;          /* 顶部 */
-            float v1 = ((row + 1) * FONT_CJK_H) / (float)gCjkH;    /* 底部 */
+            float v0 = (row * FONT_CJK_H) / (float)gCjkH;
+            float v1 = ((row + 1) * FONT_CJK_H) / (float)gCjkH;
             glyph(gCjkV, &gCjkN, x, y, FONT_CJK_W * scale, FONT_CJK_H * scale,
                   u0, v0, u1, v1, r, g, b, a);
             x += FONT_CJK_W * scale;
         }
     }
+}
+
+static void drawText(float x, float y, const char* s, float scale,
+                     float r, float g, float b, float a) {
+    drawTextN(x, y, s, (int)strlen(s), scale, r, g, b, a);
 }
 
 /* ================= 提交绘制 ================= */
@@ -385,107 +407,163 @@ static void flushBatches(void) {
 /* ================= 配色 ================= */
 #define CLR_BG        0.10f, 0.11f, 0.14f
 #define CLR_TOOLBAR   0.15f, 0.17f, 0.21f
-#define CLR_BTN       0.24f, 0.28f, 0.35f
-#define CLR_BTN_HOT   0.30f, 0.55f, 0.90f
-#define CLR_WIN_BG    0.12f, 0.14f, 0.18f
-#define CLR_BORDER    0.30f, 0.34f, 0.42f
 #define CLR_TEXT      0.88f, 0.90f, 0.93f
-#define CLR_TITLE     0.60f, 0.75f, 0.95f
 #define CLR_DIM       0.55f, 0.58f, 0.62f
 #define CLR_HL        1.00f, 0.80f, 0.25f
 
-static void logLineColor(const char* line, float* r, float* g, float* b) {
-    if (strstr(line, " E ")) { *r = 0.72f; *g = 0.06f; *b = 0.06f; return; }  /* 深红 */
-    if (strstr(line, " W ")) { *r = 0.72f; *g = 0.45f; *b = 0.00f; return; }  /* 深琥珀 */
-    if (strstr(line, " I ")) { *r = 0.05f; *g = 0.30f; *b = 0.60f; return; }  /* 深蓝 */
-    *r = 0.05f; *g = 0.06f; *b = 0.08f;                                       /* 近黑 */
+static void logLineColor(const char* line, int len, float* r, float* g, float* b) {
+    if (memfind(line, len, " E ")) { *r = 0.72f; *g = 0.06f; *b = 0.06f; return; }
+    if (memfind(line, len, " W ")) { *r = 0.72f; *g = 0.45f; *b = 0.00f; return; }
+    if (memfind(line, len, " I ")) { *r = 0.05f; *g = 0.30f; *b = 0.60f; return; }
+    *r = 0.05f; *g = 0.06f; *b = 0.08f;
 }
 
-/* 匹配索引(过滤后的可见行) */
-static int gMatchIdx[MAX_LINES];
-static int gMatchCount = 0;
-
-static void rebuildMatches(void) {
-    gMatchCount = 0;
-    int filter = gKeyword[0] != 0;
-    for (int i = 0; i < gLineCount; i++) {
-        if (filter && !containsNoCase(gLines[i], gKeyword)) continue;
-        if (gMatchCount < MAX_LINES) gMatchIdx[gMatchCount++] = i;
-    }
+/* ================= 文件内容 / 过滤 ================= */
+static void ensureLineCap(int need) {
+    if (need <= gLineCap) return;
+    int cap = gLineCap ? gLineCap : 4096;
+    while (cap < need) cap *= 2;
+    gLineOff = (int*)realloc(gLineOff, (size_t)cap * sizeof(int));
+    gLineLen = (int*)realloc(gLineLen, (size_t)cap * sizeof(int));
+    gLineCap = cap;
 }
 
-/* 视觉行(自动换行后的每一行): 源行号 + 段范围 [s, e) */
-typedef struct { int line; int s; int e; } VRow;
-#define MAX_VROWS 4096
-static VRow gVRows[MAX_VROWS];
-static int  gVRowCount = 0;
-
-/* 把匹配到的源行按最大宽度拆成视觉行(逐字符, 至少放一个字符) */
-static void buildVRows(float scale, float maxW) {
-    gVRowCount = 0;
-    for (int m = 0; m < gMatchCount && gVRowCount < MAX_VROWS; m++) {
-        const char* s = gLines[gMatchIdx[m]];
-        const char* p = s;
-        while (*p && gVRowCount < MAX_VROWS) {
-            const char* q = p, *end = p;
-            float w = 0;
-            while (*q) {
-                unsigned int cp = utf8Next(&q);
-                float cw = (cp < 0x80 ? FONT_ASC_W : FONT_CJK_W) * scale;
-                if (w + cw > maxW && end != p) break;  /* 已放不下且本段已有字符 */
-                w += cw;
-                end = q;
-                if (w >= maxW) break;                  /* 已填满 */
-            }
-            gVRows[gVRowCount].line = gMatchIdx[m];
-            gVRows[gVRowCount].s = (int)(p - s);
-            gVRows[gVRowCount].e = (int)(end - s);
-            gVRowCount++;
-            p = end;
-        }
-    }
+static void ensureMatchCap(int need) {
+    if (need <= gMatchCap) return;
+    int cap = gMatchCap ? gMatchCap : 4096;
+    while (cap < need) cap *= 2;
+    gMatchIdx = (int*)realloc(gMatchIdx, (size_t)cap * sizeof(int));
+    gMatchCap = cap;
 }
 
-/* ================= 文件装载 / 解析 ================= */
-/* 把打开的文件内容填入 gFileLines 并立即显示 */
-static void applyFileContent(const char* text) {
-    gFileLineCount = 0;
+/* 扫描 gText 建立行索引 */
+static void buildLineIndex(void) {
     gLineCount = 0;
-    gScroll = 0;
-    gFileIdx = 0;
-    gRunning = 0;
-
-    const char* p = text;
-    while (*p && gFileLineCount < MAX_LINES) {
-        const char* nl = strchr(p, '\n');
-        size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        if (len >= MAX_LEN) len = MAX_LEN - 1;
-        if (len > 0 && p[len-1] == '\r') len--;      /* 去掉 CRLF 的 \r */
-        if (len > 0) {
-            memcpy(gFileLines[gFileLineCount], p, len);
-            gFileLines[gFileLineCount][len] = 0;
-            memcpy(gLines[gFileLineCount], gFileLines[gFileLineCount], len + 1);
-            gFileLineCount++;
-            gLineCount++;
-        }
+    const char* p = gText;
+    const char* end = gText + gTextLen;
+    while (p < end) {
+        const char* nl = (const char*)memchr(p, '\n', (size_t)(end - p));
+        size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (len > 0 && p[len-1] == '\r') len--;   /* 去掉 CRLF 的 \r */
+        ensureLineCap(gLineCount + 1);
+        gLineOff[gLineCount] = (int)(p - gText);
+        gLineLen[gLineCount] = (int)len;
+        gLineCount++;
         if (!nl) break;
         p = nl + 1;
     }
-    gStatus = 1; /* 已载入 */
 }
 
-/* 开始“运行解析”: 清空显示后逐行流入(模拟逐行解析) */
+static void appendMatches(int from, int to) {
+    int filter = gKeyword[0] != 0;
+    for (int i = from; i < to; i++) {
+        if (filter && !containsNoCase(gText + gLineOff[i], (size_t)gLineLen[i], gKeyword))
+            continue;
+        ensureMatchCap(gMatchCount + 1);
+        gMatchIdx[gMatchCount++] = i;
+    }
+}
+
+static void rebuildMatches(void) {
+    gMatchCount = 0;
+    appendMatches(0, gDisplayed);
+}
+
+/* 载入文件内容; tail=1 跳到末尾(刷新), tail=0 显示开头(打开) */
+static void applyFileContent(const char* data, size_t len, int tail) {
+    free(gText); gText = NULL; gTextLen = 0;
+    free(gLineOff); gLineOff = NULL;
+    free(gLineLen); gLineLen = NULL;
+    gLineCap = 0; gLineCount = 0;
+
+    if (!data || len == 0) {
+        gDisplayed = 0; gScroll = 0; gRunning = 0;
+        gFilterDirty = 1; gStatus = 0;
+        return;
+    }
+
+    gText = (char*)malloc(len + 1);
+    if (!gText) return;
+    memcpy(gText, data, len);
+    gText[len] = 0;
+    gTextLen = len;
+
+    buildLineIndex();
+
+    gDisplayed = gLineCount;
+    gScroll = tail ? 0 : INT_MAX;   /* tail 看末尾, 否则看开头 */
+    gRunning = 0;
+    gStatus = 1;
+    gFilterDirty = 1;
+}
+
+/* 开始“运行解析”: 清空显示后逐行流入(大文件按比例快速流入) */
 static void startParse(void) {
-    if (gFileLineCount == 0) return;
-    gLineCount = 0;
-    gFileIdx = 0;
+    if (gLineCount == 0) return;
+    gDisplayed = 0;
     gScroll = 0;
     gRunning = 1;
-    gStatus = 2; /* 解析中 */
+    gStatus = 2;
+    gFilterDirty = 1;
 }
 
-/* 每帧最多流入的行数 */
-#define STREAM_PER_FRAME 2
+/* ================= 日志窗口绘制(自动换行) ================= */
+static float drawWrapped(float x, float y, const char* s, int len, float scale,
+                         float maxW, float lineH, float bottom,
+                         float r, float g, float b) {
+    const char* end = s + len;
+    const char* p = s;
+    while (p < end && y + FONT_ASC_H * scale <= bottom) {
+        const char* q = p;
+        const char* segEnd = p;
+        float w = 0;
+        while (q < end) {
+            const char* t = q;
+            unsigned int cp = utf8Next(&q);
+            float cw = (cp < 0x80 ? FONT_ASC_W : FONT_CJK_W) * scale;
+            if (w + cw > maxW && segEnd != p) { q = t; break; }  /* 放不下且已有字符 -> 回退 */
+            w += cw;
+            segEnd = q;
+            if (w >= maxW) break;                                /* 已填满 */
+        }
+        drawTextN(x, y, p, (int)(segEnd - p), scale, r, g, b, 1.0f);
+        y += lineH;
+        p = segEnd;
+    }
+    return y;
+}
+
+static void drawLogWindow(Layout* L, float S, float pad) {
+    float maxW = L->logW - 2.0f * pad;
+    int visibleLines = (int)((L->logH - L->titlePad - 6.0f * S) / L->lineH);
+    if (visibleLines < 1) visibleLines = 1;
+
+    if (gMatchCount == 0) {
+        const char* msg = gLineCount ? S_NO_MATCH : S_EMPTY_LOG;
+        float tx = L->logX + (L->logW - textWidth(msg, S)) / 2.0f;
+        float ty = L->logY + L->titlePad + L->lineH;
+        drawText(tx, ty, msg, S, 0.45f, 0.48f, 0.52f, 1.0f);
+        return;
+    }
+
+    int maxScroll = gMatchCount - visibleLines;
+    if (maxScroll < 0) maxScroll = 0;
+    if (gScroll > maxScroll) gScroll = maxScroll;
+    if (gScroll < 0) gScroll = 0;
+
+    int start = gMatchCount - visibleLines - gScroll;
+    if (start < 0) start = 0;
+
+    float y = L->logY + L->titlePad;
+    float bottom = L->logY + L->logH - 4.0f * S;
+    for (int i = start; i < gMatchCount && y + L->lineH <= bottom; i++) {
+        int li = gMatchIdx[i];
+        float r, g, b;
+        logLineColor(gText + gLineOff[li], gLineLen[li], &r, &g, &b);
+        y = drawWrapped(L->logX + pad, y, gText + gLineOff[li], gLineLen[li],
+                        S, maxW, L->lineH, bottom, r, g, b);
+    }
+}
 
 /* ================= 逐帧绘制 ================= */
 static void drawFrame(void) {
@@ -495,46 +573,39 @@ static void drawFrame(void) {
     Layout L;
     computeLayout(&L);
     float W = (float)gW, H = (float)gH, S = L.S;
-    float bd = S;                       /* 边框宽度(随缩放) */
+    float bd = S;
     float pad = 8.0f * S;
 
-    /* ---- 运行解析: 逐行流入显示 ---- */
-    if (gRunning && gFileIdx < gFileLineCount) {
-        for (int i = 0; i < STREAM_PER_FRAME && gFileIdx < gFileLineCount; i++) {
-            if (gLineCount < MAX_LINES) {
-                memcpy(gLines[gLineCount], gFileLines[gFileIdx], MAX_LEN);
-                gLines[gLineCount][MAX_LEN - 1] = 0;
-                gLineCount++;
-            }
-            gFileIdx++;
-        }
-        if (gFileIdx >= gFileLineCount) {
+    /* ---- 过滤匹配 ---- */
+    if (gFilterDirty) {
+        rebuildMatches();
+        gFilterDirty = 0;
+    }
+
+    /* ---- 运行解析: 逐行流入(大文件按比例快速流入) ---- */
+    if (gRunning && gDisplayed < gLineCount) {
+        int prev = gDisplayed;
+        int chunk = gLineCount / 120 + 1;   /* 约 2 秒流完 */
+        gDisplayed += chunk;
+        if (gDisplayed > gLineCount) gDisplayed = gLineCount;
+        appendMatches(prev, gDisplayed);
+        if (gDisplayed >= gLineCount) {
             gRunning = 0;
-            gStatus = 3; /* 已停止 */
+            gStatus = 3;
         }
     }
-    rebuildMatches();
-    buildVRows(S, L.logW - 2.0f * pad);
-
-    int visible = (int)((L.logH - L.titlePad - 6.0f * S) / L.lineH);
-    if (visible < 1) visible = 1;
-    int maxScroll = gVRowCount - visible;
-    if (maxScroll < 0) maxScroll = 0;
-    if (gScroll > maxScroll) gScroll = maxScroll;
-    if (gScroll < 0) gScroll = 0;
 
     /* ---- 清屏 ---- */
     glViewport(0, 0, gW, gH);
     glClearColor(CLR_BG, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    /* ============ 主界面批次 ============ */
     resetBatches();
 
     /* 工具栏背景 */
     rectf(0, L.toolbarY, W, L.toolbarH, CLR_TOOLBAR, 1.0f);
 
-    /* 五个按钮 */
+    /* 按钮 */
     for (int i = 0; i < BTN_COUNT; i++) {
         int hot = 0;
         if (i == BTN_PARSE  && gRunning) hot = 1;
@@ -562,32 +633,7 @@ static void drawFrame(void) {
     rectf(L.logX - bd, L.logY - bd, L.logW + 2*bd, L.logH + 2*bd, 0.72f, 0.75f, 0.79f, 1.0f);
     rectf(L.logX, L.logY, L.logW, L.logH, 0.99f, 0.99f, 0.99f, 1.0f);
     drawText(L.logX + pad, L.logY + 5.0f * S, S_TITLE_LOG, S, 0.20f, 0.26f, 0.36f, 1.0f);
-
-    if (gMatchCount == 0) {
-        const char* msg = gLineCount ? S_NO_MATCH : S_EMPTY_LOG;
-        float tx = L.logX + (L.logW - textWidth(msg, S)) / 2.0f;
-        float ty = L.logY + L.titlePad + L.lineH;
-        drawText(tx, ty, msg, S, 0.45f, 0.48f, 0.52f, 1.0f);
-    } else {
-        int start = gVRowCount - visible - gScroll;
-        if (start < 0) start = 0;
-        int end = gVRowCount - gScroll;
-        if (end < 0) end = 0;
-        if (end > gVRowCount) end = gVRowCount;
-        for (int k = start; k < end; k++) {
-            float y = L.logY + L.titlePad + (float)(k - start) * L.lineH;
-            if (y + L.lineH > L.logY + L.logH - 4.0f * S) break;
-            VRow* vr = &gVRows[k];
-            int len = vr->e - vr->s;
-            char seg[MAX_LEN];
-            if (len >= MAX_LEN) len = MAX_LEN - 1;
-            memcpy(seg, gLines[vr->line] + vr->s, len);
-            seg[len] = 0;
-            float r, g, b;
-            logLineColor(gLines[vr->line], &r, &g, &b);
-            drawText(L.logX + pad, y, seg, S, r, g, b, 1.0f);
-        }
-    }
+    drawLogWindow(&L, S, pad);
 
     /* 搜索关键字子窗口 */
     {
@@ -595,40 +641,37 @@ static void drawFrame(void) {
         if (gSearchFocus) { bdr = 1.00f; bdg = 0.80f; bdb = 0.25f; }
         else              { bdr = 0.30f; bdg = 0.34f; bdb = 0.42f; }
         rectf(L.searchX - bd, L.searchY - bd, L.searchW + 2*bd, L.searchH + 2*bd, bdr, bdg, bdb, 1.0f);
-        rectf(L.searchX, L.searchY, L.searchW, L.searchH, CLR_WIN_BG, 1.0f);
-        drawText(L.searchX + pad, L.searchY + 5.0f * S, S_TITLE_SEARCH, S, CLR_TITLE, 1.0f);
+        rectf(L.searchX, L.searchY, L.searchW, L.searchH, 0.12f, 0.14f, 0.18f, 1.0f);
+        drawText(L.searchX + pad, L.searchY + 5.0f * S, S_TITLE_SEARCH, S, 0.60f, 0.75f, 0.95f, 1.0f);
 
-        /* 关键字或提示 */
         if (gKeyword[0]) {
             drawText(L.searchX + pad, L.searchY + L.titlePad + 2.0f * S, gKeyword, S, CLR_HL, 1.0f);
         } else {
             drawText(L.searchX + pad, L.searchY + L.titlePad + 2.0f * S, S_SEARCH_HINT, S, CLR_DIM, 1.0f);
         }
-        /* 匹配计数(靠右) */
         char mc[64];
         snprintf(mc, sizeof(mc), S_MATCH_FMT, gMatchCount);
         float tx = L.searchX + L.searchW - pad - textWidth(mc, S);
         drawText(tx, L.searchY + L.titlePad + 2.0f * S, mc, S, CLR_DIM, 1.0f);
     }
 
-    /* 主界面先提交, 保证帮助面板覆盖其上 */
     flushBatches();
 
-    /* ============ 帮助面板(覆盖层) ============ */
+    /* 帮助面板(覆盖层) */
     if (gHelpOpen) {
-        float hw = W - 2.0f * L.margin * 3.0f;
-        float hh = 9.0f * L.lineH;
+        float hw = W - 6.0f * L.margin;
+        float hh = 10.0f * L.lineH;
         float hx = (W - hw) / 2.0f;
         float hy = (H - hh) / 2.0f;
 
-        rectf(hx - bd, hy - bd, hw + 2*bd, hh + 2*bd, CLR_BORDER, 1.0f);
+        rectf(hx - bd, hy - bd, hw + 2*bd, hh + 2*bd, 0.30f, 0.34f, 0.42f, 1.0f);
         rectf(hx, hy, hw, hh, 0.16f, 0.18f, 0.23f, 0.98f);
 
         drawText(hx + pad, hy + 6.0f * S, S_HELP_TITLE, S, CLR_HL, 1.0f);
         static const char* const HELP_LINES[] = {
-            S_HELP_L1, S_HELP_L2, S_HELP_L3, S_HELP_L4, S_HELP_L5, S_HELP_L6
+            S_HELP_L1, S_HELP_L2, S_HELP_L3, S_HELP_L4, S_HELP_L5, S_HELP_L6, S_HELP_L7
         };
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 7; i++)
             drawText(hx + pad, hy + L.titlePad + (float)i * L.lineH + 4.0f * S,
                      HELP_LINES[i], S, CLR_TEXT, 1.0f);
         flushBatches();
@@ -668,17 +711,20 @@ static void touchUp(JNIEnv* env, float x, float y) {
     if (gDownBtn >= 0 && btn == gDownBtn) {
         switch (btn) {
             case BTN_OPEN:
-                /* 调系统文件选择器, 结果经 setFileContent 回来 */
                 gHelpOpen = 0;
                 if (env && gCls && gReqOpenFile)
                     (*env)->CallStaticVoidMethod(env, gCls, gReqOpenFile);
+                break;
+            case BTN_REFRESH:
+                if (env && gCls && gReqRefreshFile)
+                    (*env)->CallStaticVoidMethod(env, gCls, gReqRefreshFile);
                 break;
             case BTN_PARSE:
                 startParse();
                 break;
             case BTN_STOP:
                 gRunning = 0;
-                if (gFileIdx < gFileLineCount || gLineCount > 0) gStatus = 3;
+                if (gLineCount > 0) gStatus = 3;
                 break;
             case BTN_SEARCH:
                 gSearchFocus = 1;
@@ -719,12 +765,12 @@ Java_com_example_ndkgles_LogViewGL_init(JNIEnv* env, jclass cls) {
     gTexCjk = makeFontTexture(&FONT_CJK_BMP[0][0], FONT_CJK_COUNT,
                               FONT_CJK_W, FONT_CJK_H, 16, &gCjkW, &gCjkH);
 
-    /* 缓存 Java 回调 */
     jclass c = (*env)->FindClass(env, "com/example/ndkgles/LogViewGL");
     if (c) {
         gCls = (*env)->NewGlobalRef(env, c);
-        gReqFocus    = (*env)->GetStaticMethodID(env, c, "requestSearchFocus", "()V");
-        gReqOpenFile = (*env)->GetStaticMethodID(env, c, "requestOpenFile", "()V");
+        gReqFocus     = (*env)->GetStaticMethodID(env, c, "requestSearchFocus", "()V");
+        gReqOpenFile  = (*env)->GetStaticMethodID(env, c, "requestOpenFile", "()V");
+        gReqRefreshFile = (*env)->GetStaticMethodID(env, c, "requestRefreshFile", "()V");
     }
 
     gInited = 1;
@@ -780,19 +826,23 @@ Java_com_example_ndkgles_LogViewGL_setKeyword(JNIEnv* env, jclass cls, jstring k
         strncpy(gKeyword, s, sizeof(gKeyword) - 1);
         gKeyword[sizeof(gKeyword) - 1] = 0;
         gSearchFocus = 0;
+        gFilterDirty = 1;
         (*env)->ReleaseStringUTFChars(env, kw, s);
     }
     pthread_mutex_unlock(&gLock);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_ndkgles_LogViewGL_setFileContent(JNIEnv* env, jclass cls, jstring text) {
+Java_com_example_ndkgles_LogViewGL_setFileContent(JNIEnv* env, jclass cls, jbyteArray data, jboolean tail) {
     (void)cls;
-    const char* s = (*env)->GetStringUTFChars(env, text, NULL);
+    jsize len = (*env)->GetArrayLength(env, data);
+    if (len > MAX_BYTES) len = MAX_BYTES;
+    char* buf = (char*)malloc((size_t)len + 1);
+    if (!buf) return;
+    if (len > 0) (*env)->GetByteArrayRegion(env, data, 0, len, (jbyte*)buf);
+    buf[len] = 0;
     pthread_mutex_lock(&gLock);
-    if (s) {
-        applyFileContent(s);
-        (*env)->ReleaseStringUTFChars(env, text, s);
-    }
+    applyFileContent(buf, (size_t)len, tail ? 1 : 0);
     pthread_mutex_unlock(&gLock);
+    free(buf);
 }
