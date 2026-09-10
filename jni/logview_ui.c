@@ -530,6 +530,7 @@ static float drawWrapped(float x, float y, const char* s, int len, float scale,
         y += lineH;
         p = segEnd;
     }
+    if (len == 0) y += lineH;   /* 空行也占一行, 避免行号/内容重叠 */
     return y;
 }
 
@@ -538,8 +539,9 @@ static void drawLogWindow(Layout* L, float S, float pad) {
     int digits = 1, n = gLineCount;
     while (n >= 10) { n /= 10; digits++; }
     float gutterW = (digits + 1) * FONT_ASC_W * S;
+    float sbW = 8.0f * S;                            /* 滚动条预留宽度 */
     float textX = L->logX + pad + gutterW;
-    float maxW = L->logW - 2.0f * pad - gutterW;
+    float maxW = L->logW - 2.0f * pad - gutterW - sbW;
     if (maxW < FONT_ASC_W * S) maxW = FONT_ASC_W * S;
 
     int visibleLines = (int)((L->logH - L->titlePad - 6.0f * S) / L->lineH);
@@ -579,6 +581,23 @@ static void drawLogWindow(Layout* L, float S, float pad) {
         logLineColor(gText + gLineOff[li], gLineLen[li], &r, &g, &b);
         y = drawWrapped(textX, y, gText + gLineOff[li], gLineLen[li],
                         S, maxW, L->lineH, bottom, r, g, b);
+    }
+
+    /* 滚动条(有可滚动内容时显示) */
+    if (maxScroll > 0) {
+        float trackW = 3.0f * S;
+        float trackX = L->logX + L->logW - pad - trackW;
+        float trackY = L->logY + L->titlePad;
+        float trackH = L->logH - L->titlePad - 4.0f * S;
+        float thumbH = trackH * (float)visibleLines / (float)gMatchCount;
+        float minThumb = 12.0f * S;
+        if (thumbH < minThumb) thumbH = minThumb;
+        if (thumbH > trackH) thumbH = trackH;
+        float range = trackH - thumbH;
+        float frac = 1.0f - (float)gScroll / (float)maxScroll;  /* 0=顶部, 1=底部 */
+        float thumbY = trackY + frac * range;
+        rectf(trackX, trackY, trackW, trackH, 0.90f, 0.91f, 0.93f, 1.0f);
+        rectf(trackX, thumbY, trackW, thumbH, 0.55f, 0.58f, 0.62f, 1.0f);
     }
 }
 
