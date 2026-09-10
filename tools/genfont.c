@@ -86,18 +86,24 @@ static int pick_sc_face(FT_Library lib) {
     return fallback < 0 ? 0 : fallback;
 }
 
-/* 把一个 FT 灰度位图居中塞进 w x h 的 8bit cell 里 */
-static void blit(FT_Bitmap* bmp, unsigned char* cell, int w, int h) {
+/* 把一个 FT 灰度位图按基线/水平 bearing 塞进 w x h 的 8bit cell 里 */
+static void blit(FT_Bitmap* bmp, unsigned char* cell, int w, int h, int baseline,
+                 int left, int top) {
     memset(cell, 0, w * h);
     int bw = (int)bmp->width;
     int bh = (int)bmp->rows;
     if (bw > w) bw = w;
     if (bh > h) bh = h;
-    int ox = (w - bw) / 2;
-    int oy = (h - bh) / 2;
+    int ox = left;                         /* 水平 bearing, 让字母左右对齐 */
+    if (ox < 0) ox = 0;
+    if (ox + bw > w) ox = w - bw;
+    if (ox < 0) ox = 0;
+    int oy = baseline - top;               /* 基线对齐: top 是基线到字形顶的距离 */
     for (int y = 0; y < bh; y++) {
+        int dsty = oy + y;
+        if (dsty < 0 || dsty >= h) continue;
         const unsigned char* src = bmp->buffer + y * bmp->pitch;
-        unsigned char* dst = cell + (oy + y) * w + ox;
+        unsigned char* dst = cell + dsty * w + ox;
         if (bmp->pixel_mode == FT_PIXEL_MODE_MONO) {
             for (int x = 0; x < bw; x++)
                 dst[x] = (src[x >> 3] & (0x80 >> (x & 7))) ? 255 : 0;
@@ -116,15 +122,28 @@ int main(void) {
     /* ---- ASCII ---- */
     FT_Face af;
     if (FT_New_Face(lib, ASCII_FONT, 0, &af)) { fprintf(stderr, "open ascii font failed\n"); return 1; }
-    FT_Set_Pixel_Sizes(af, ASC_W, ASC_H);
+    FT_Set_Pixel_Sizes(af, ASC_W, ASC_H - 1);  /* 字号比 cell 小 1px, 使 ascender+descender 正好塞进 16px */
+    /* 基线 = 所有字形里最大的 bitmap_top(即最高的字形顶部), 这样同字体共用同一条基线 */
+    int ascBaseline = 0;
+    for (int c = 0x20; c <= 0x7E; c++) {
+        FT_Load_Char(af, c, FT_LOAD_RENDER);
+        if (af->glyph->bitmap_top > ascBaseline) ascBaseline = af->glyph->bitmap_top;
+    }
+    if (ascBaseline > ASC_H) ascBaseline = ASC_H;
 
     /* ---- CJK ---- */
     FT_Face cf;
     int sc = pick_sc_face(lib);
     if (FT_New_Face(lib, CJK_FONT, sc, &cf)) { fprintf(stderr, "open cjk font failed\n"); return 1; }
     FT_Set_Pixel_Sizes(cf, 0, CJK_H);
-    fprintf(stderr, "ascii=%s cjk face %d (%s)  cjk chars=%d\n",
-            af->family_name, sc, cf->family_name, gCjkCount);
+    int cjkBaseline = 0;
+    for (int i = 0; i < gCjkCount; i++) {
+        FT_Load_Char(cf, gCjk[i], FT_LOAD_RENDER);
+        if (cf->glyph->bitmap_top > cjkBaseline) cjkBaseline = cf->glyph->bitmap_top;
+    }
+    if (cjkBaseline > CJK_H) cjkBaseline = CJK_H;
+    fprintf(stderr, "ascii=%s baseline=%d  cjk face %d (%s) baseline=%d  cjk chars=%d\n",
+            af->family_name, ascBaseline, sc, cf->family_name, cjkBaseline, gCjkCount);
 
     FILE* out = stdout;
     fprintf(out,
@@ -145,7 +164,8 @@ int main(void) {
     unsigned char cell[ASC_W * ASC_H];
     for (int c = 0x20; c <= 0x7E; c++) {
         FT_Load_Char(af, c, FT_LOAD_RENDER);
-        blit(&af->glyph->bitmap, cell, ASC_W, ASC_H);
+        blit(&af->glyph->bitmap, cell, ASC_W, ASC_H, ascBaseline,
+             af->glyph->bitmap_left, af->glyph->bitmap_top);
         fputs("  {", out);
         for (int i = 0; i < ASC_W * ASC_H; i++) { fprintf(out, "%d,", cell[i]); }
         fputs("},\n", out);
@@ -163,7 +183,8 @@ int main(void) {
     unsigned char ccell[CJK_W * CJK_H];
     for (int i = 0; i < gCjkCount; i++) {
         FT_Load_Char(cf, gCjk[i], FT_LOAD_RENDER);
-        blit(&cf->glyph->bitmap, ccell, CJK_W, CJK_H);
+        blit(&cf->glyph->bitmap, ccell, CJK_W, CJK_H, cjkBaseline,
+             cf->glyph->bitmap_left, cf->glyph->bitmap_top);
         fputs("  {", out);
         for (int j = 0; j < CJK_W * CJK_H; j++) { fprintf(out, "%d,", ccell[j]); }
         fputs("},\n", out);

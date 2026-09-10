@@ -534,7 +534,14 @@ static float drawWrapped(float x, float y, const char* s, int len, float scale,
 }
 
 static void drawLogWindow(Layout* L, float S, float pad) {
-    float maxW = L->logW - 2.0f * pad;
+    /* 行号槽宽: 按总行数的位数 */
+    int digits = 1, n = gLineCount;
+    while (n >= 10) { n /= 10; digits++; }
+    float gutterW = (digits + 1) * FONT_ASC_W * S;
+    float textX = L->logX + pad + gutterW;
+    float maxW = L->logW - 2.0f * pad - gutterW;
+    if (maxW < FONT_ASC_W * S) maxW = FONT_ASC_W * S;
+
     int visibleLines = (int)((L->logH - L->titlePad - 6.0f * S) / L->lineH);
     if (visibleLines < 1) visibleLines = 1;
 
@@ -545,6 +552,10 @@ static void drawLogWindow(Layout* L, float S, float pad) {
         drawText(tx, ty, msg, S, 0.45f, 0.48f, 0.52f, 1.0f);
         return;
     }
+
+    /* 行号分隔线 */
+    rectf(textX - pad * 0.6f, L->logY + L->titlePad, S,
+          L->logH - L->titlePad - 4.0f * S, 0.86f, 0.87f, 0.89f, 1.0f);
 
     int maxScroll = gMatchCount - visibleLines;
     if (maxScroll < 0) maxScroll = 0;
@@ -558,9 +569,15 @@ static void drawLogWindow(Layout* L, float S, float pad) {
     float bottom = L->logY + L->logH - 4.0f * S;
     for (int i = start; i < gMatchCount && y + L->lineH <= bottom; i++) {
         int li = gMatchIdx[i];
+        /* 行号(1-based, 右对齐; 换行续行不重复显示) */
+        char numbuf[16];
+        snprintf(numbuf, sizeof(numbuf), "%d", li + 1);
+        float nw = textWidth(numbuf, S);
+        drawText(textX - FONT_ASC_W * S - nw, y, numbuf, S, 0.62f, 0.66f, 0.72f, 1.0f);
+        /* 日志文本(自动换行) */
         float r, g, b;
         logLineColor(gText + gLineOff[li], gLineLen[li], &r, &g, &b);
-        y = drawWrapped(L->logX + pad, y, gText + gLineOff[li], gLineLen[li],
+        y = drawWrapped(textX, y, gText + gLineOff[li], gLineLen[li],
                         S, maxW, L->lineH, bottom, r, g, b);
     }
 }
