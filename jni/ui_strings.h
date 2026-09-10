@@ -36,7 +36,7 @@
 #define S_NO_MATCH      "无匹配行"
 
 /* ---- 搜索窗口提示 ---- */
-#define S_SEARCH_HINT   "输入关键字过滤"
+#define S_SEARCH_HINT   "点击 搜索 输入关键字"
 #define S_MATCH_FMT     "匹配 %d 行"
 
 /* ---- 帮助面板 ---- */

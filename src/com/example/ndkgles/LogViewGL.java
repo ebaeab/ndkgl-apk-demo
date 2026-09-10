@@ -1,22 +1,18 @@
 package com.example.ndkgles;
 
-import android.content.Context;
 import android.opengl.GLSurfaceView;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.inputmethod.InputMethodManager;
-import android.widget.EditText;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-/** 日志查看器的 native 桥接: 装载 liblogview.so, 转发渲染/触摸/关键字。 */
+/** 日志查看器的 native 桥接: 装载 liblogview.so, 转发渲染/触摸/关键字/文件。 */
 public final class LogViewGL {
     static {
         System.loadLibrary("logview");
     }
 
-    private static EditText sEdit = null;
     private static LogViewActivity sActivity = null;
     private static final Handler sMain = new Handler(Looper.getMainLooper());
 
@@ -29,23 +25,16 @@ public final class LogViewGL {
     public  static native void setKeyword(String kw);
     public  static native void setFileContent(byte[] data, boolean tail);
 
-    /** 由 LogViewActivity 注入底部输入框与 Activity, 供 [搜索]/[打开] 回调。 */
-    public static void attach(LogViewActivity a, EditText edit) {
+    /** 由 LogViewActivity 注入自身, 供 native 回调。 */
+    public static void attach(LogViewActivity a) {
         sActivity = a;
-        sEdit = edit;
     }
 
-    /** 由 native 调用(在 GL 线程), 切回主线程聚焦输入框并弹出软键盘。 */
+    /** 由 native 调用(在 GL 线程), 切回主线程弹出搜索关键字输入框。 */
     public static void requestSearchFocus() {
         sMain.post(new Runnable() {
             @Override public void run() {
-                if (sEdit != null) {
-                    sEdit.requestFocus();
-                    sEdit.setSelection(sEdit.length());
-                    InputMethodManager imm = (InputMethodManager)
-                        sEdit.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-                    if (imm != null) imm.showSoftInput(sEdit, InputMethodManager.SHOW_IMPLICIT);
-                }
+                if (sActivity != null) sActivity.showSearchDialog();
             }
         });
     }
