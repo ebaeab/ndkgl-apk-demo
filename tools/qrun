@@ -1,0 +1,44 @@
+#!/bin/bash
+# ============================================================
+#  qrun —— 用 qemu 运行 Google 官方 x86_64 版 build-tools 工具
+#           (aapt2 / zipalign / aapt / aidl ...)
+#
+#  背景: Google 的 build-tools 只发布 x86_64 二进制, arm64 手机无法直接执行。
+#       这里借 qemu-user-x86-64 + 一个仅含 glibc 的 x86_64 根目录来运行。
+#
+#  用法:  tools/qrun aapt2 version
+#         tools/qrun zipalign -f 4 in.apk out.apk
+#
+#  路径解析(依次尝试, 可用环境变量覆盖):
+#    X64ROOT   x86_64 glibc 根目录   (默认 $HOME/x64root)
+#    BT_DIR    build-tools 目录      (默认自动探测 $HOME/android-sdk 下的 build-tools)
+# ============================================================
+set -e
+
+# 清除 Termux 的 LD_PRELOAD(libtermux-exec), 否则会干扰 qemu 加载 x86_64 程序
+unset LD_PRELOAD
+
+X64ROOT="${X64ROOT:-$HOME/x64root}"
+
+# 自动探测 build-tools 目录
+if [ -z "$BT_DIR" ]; then
+    for d in \
+        "$HOME/android-sdk/android-14" \
+        "$HOME/android-sdk/build-tools"/* \
+        "$HOME/android-sdk"/*build-tools* ; do
+        [ -x "$d/aapt2" ] && { BT_DIR="$d"; break; }
+    done
+fi
+BT_DIR="${BT_DIR:-$HOME/android-sdk/android-14}"
+
+if [ ! -x "$X64ROOT" ] && [ ! -d "$X64ROOT" ]; then
+    echo "qrun: 找不到 x86_64 根目录: $X64ROOT" >&2
+    echo "      请先运行 tools/setup-android-toolchain.sh" >&2
+    exit 1
+fi
+
+TOOL="$1"; shift
+exec qemu-x86_64 \
+    -L "$X64ROOT" \
+    -E LD_LIBRARY_PATH=/lib/x86_64-linux-gnu \
+    "$BT_DIR/$TOOL" "$@"
