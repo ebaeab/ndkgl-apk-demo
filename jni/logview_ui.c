@@ -1,7 +1,7 @@
 /*
  * logview_ui.c —— 原生 OpenGL ES2 日志查看器 UI
  *
- * 与 jni_gl.c 一样: EGL/线程/swap 交给 GLSurfaceView, native 只负责绘制与交互。
+ * EGL/线程/swap 交给 GLSurfaceView, native 只负责绘制与交互。
  * 本文件实现一个带「工具栏 + 日志显示子窗口 + 搜索关键字子窗口」的工具界面:
  *
  *   工具栏:  [打开] [刷新] [运行解析] [停止] [搜索] [帮助]

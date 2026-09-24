@@ -44,11 +44,11 @@ mkdir -p "$OUT/build" "$OUT/apk"
 # ---------------- 0) native ----------------
 # 只要缺少产物或任一 native 源码/字体/脚本比 .so 新, 就重新编译
 needs_native=0
-if [ ! -f "lib/$ABI/libnativegl.so" ] || [ ! -f "lib/$ABI/liblogview.so" ]; then
+if [ ! -f "lib/$ABI/liblogview.so" ]; then
     needs_native=1
 fi
-for src in jni/jni_gl.c jni/logview_ui.c jni/ui_strings.h jni/font_bitmap.h build-native.sh; do
-    if [ "$src" -nt "lib/$ABI/libnativegl.so" ] || [ "$src" -nt "lib/$ABI/liblogview.so" ]; then
+for src in jni/logview_ui.c jni/ui_strings.h jni/font_bitmap.h build-native.sh; do
+    if [ "$src" -nt "lib/$ABI/liblogview.so" ]; then
         needs_native=1
     fi
 done
